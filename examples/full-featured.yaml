@@ -1,0 +1,97 @@
+# Full-Featured Configuration
+# Demonstrates all available options
+
+global:
+  log_level: debug
+  log_format: json
+  metrics:
+    enabled: true
+    address: "0.0.0.0:9090"
+    path: /metrics
+
+# Default health check settings (can be overridden per-backend)
+health_check_defaults:
+  interval: 10s
+  timeout: 5s
+  unhealthy_threshold: 3
+  healthy_threshold: 2
+  cooldown: 30s
+
+frontends:
+  # HTTP Load Balancer with all options
+  - name: web-frontend
+    listen: "0.0.0.0:80"
+    protocol: http
+    backend: web-servers
+    algorithm: least_connections
+    http:
+      request_headers:
+        X-Forwarded-Proto: "http"
+        X-Request-ID: "$client_ip:$client_port"
+      response_headers:
+        X-Served-By: "$backend_name:$backend_addr"
+        X-Response-Time: "true"
+
+  # HTTPS termination would go here (TLS support planned)
+
+  # API with IP hash for session stickiness
+  - name: api-frontend
+    listen: "0.0.0.0:8080"
+    protocol: http
+    backend: api-servers
+    algorithm: ip_hash
+    http:
+      request_headers:
+        X-Real-IP: "$client_ip"
+
+  # TCP proxy for database
+  - name: db-frontend
+    listen: "0.0.0.0:5432"
+    protocol: tcp
+    backend: postgres-primary
+    algorithm: round_robin
+    tcp:
+      connect_timeout: 10s
+
+backends:
+  # Web servers with HTTP health checks
+  - name: web-servers
+    servers:
+      - address: "10.0.1.10:8000"
+        weight: 3
+      - address: "10.0.1.11:8000"
+        weight: 2
+      - address: "10.0.1.12:8000"
+        weight: 1
+    health_check:
+      type: http
+      path: /healthz
+      expected_status: 200
+      interval: 5s
+      timeout: 2s
+
+  # API servers with weighted distribution
+  - name: api-servers
+    servers:
+      - address: "10.0.2.10:3000"
+        weight: 5
+      - address: "10.0.2.11:3000"
+        weight: 5
+      - address: "10.0.2.12:3000"
+        weight: 3
+    health_check:
+      type: http
+      path: /api/health
+      expected_status: 200
+      interval: 10s
+      timeout: 3s
+
+  # Database servers with TCP health checks
+  - name: postgres-primary
+    servers:
+      - address: "10.0.3.10:5432"
+      - address: "10.0.3.11:5432"
+    health_check:
+      type: tcp
+      interval: 5s
+      timeout: 2s

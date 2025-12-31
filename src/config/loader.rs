@@ -8,13 +8,13 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to read configuration file: {0}")]
-    ReadError(#[from] std::io::Error),
+    Read(#[from] std::io::Error),
 
     #[error("failed to parse YAML: {0}")]
-    ParseError(#[from] serde_yaml::Error),
+    Parse(#[from] serde_yaml::Error),
 
     #[error("configuration validation failed: {0}")]
-    ValidationError(String),
+    Validation(String),
 }
 
 /// Load configuration from a YAML file.
@@ -38,7 +38,7 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<Config, ConfigError> {
     let config: Config = serde_yaml::from_str(&contents)?;
 
     // Validate configuration
-    validate_config(&config).map_err(ConfigError::ValidationError)?;
+    validate_config(&config).map_err(ConfigError::Validation)?;
 
     Ok(config)
 }
@@ -75,7 +75,7 @@ backends:
     fn test_load_missing_file() {
         let result = load_config("/nonexistent/path/config.yaml");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConfigError::ReadError(_)));
+        assert!(matches!(result.unwrap_err(), ConfigError::Read(_)));
     }
 
     #[test]

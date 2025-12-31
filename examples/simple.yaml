@@ -1,0 +1,18 @@
+# Simple HTTP Load Balancer
+# Minimal configuration to get started
+
+global:
+  log_level: info
+
+frontends:
+  - name: web
+    listen: "0.0.0.0:8080"
+    protocol: http
+    backend: web-servers
+    algorithm: round_robin
+
+backends:
+  - name: web-servers
+    servers:
+      - address: "127.0.0.1:9001"
+      - address: "127.0.0.1:9002"

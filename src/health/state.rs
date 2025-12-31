@@ -83,7 +83,7 @@ impl HealthState {
 
     /// Register a server for health tracking.
     pub fn register_server(&self, server: SocketAddr) {
-        self.servers.entry(server).or_insert_with(ServerHealth::default);
+        self.servers.entry(server).or_default();
     }
 
     /// Check if a server is healthy.
@@ -112,7 +112,7 @@ impl HealthState {
 
     /// Record a successful health check or request.
     pub fn record_success(&self, server: SocketAddr) {
-        let entry = self.servers.entry(server).or_insert_with(ServerHealth::default);
+        let entry = self.servers.entry(server).or_default();
 
         // Reset failures, increment successes
         entry.consecutive_failures.store(0, Ordering::Release);
@@ -130,7 +130,7 @@ impl HealthState {
 
     /// Record a failed health check or request.
     pub fn record_failure(&self, server: SocketAddr) {
-        let entry = self.servers.entry(server).or_insert_with(ServerHealth::default);
+        let entry = self.servers.entry(server).or_default();
 
         // Reset successes, increment failures
         entry.consecutive_successes.store(0, Ordering::Release);

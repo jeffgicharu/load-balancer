@@ -1,6 +1,3 @@
 //! HTTP protocol handler.
 //!
-//! To be implemented in Phase 2.
-
-/// Handles HTTP connections.
-pub struct HttpHandler;
+//! HTTP handling is implemented in the proxy module.

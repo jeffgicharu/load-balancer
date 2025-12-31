@@ -1,0 +1,36 @@
+# Weighted Load Balancing
+# Distribute traffic proportionally based on server capacity
+
+global:
+  log_level: info
+  log_format: json
+
+frontends:
+  - name: api
+    listen: "0.0.0.0:8080"
+    protocol: http
+    backend: api-servers
+    algorithm: weighted
+    http:
+      request_headers:
+        X-Request-Start: "$client_ip"
+      response_headers:
+        X-Served-By: "$backend_name"
+
+backends:
+  - name: api-servers
+    servers:
+      # Large server - gets 50% of traffic
+      - address: "10.0.0.10:8000"
+        weight: 5
+      # Medium servers - get 25% each
+      - address: "10.0.0.11:8000"
+        weight: 2
+      - address: "10.0.0.12:8000"
+        weight: 3
+    health_check:
+      type: http
+      path: /health
+      expected_status: 200
+      interval: 10s
+      timeout: 5s

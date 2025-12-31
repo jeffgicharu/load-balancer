@@ -1,6 +1,3 @@
 //! TCP protocol handler.
 //!
-//! To be implemented in Phase 2.
-
-/// Handles TCP connections.
-pub struct TcpHandler;
+//! TCP handling is implemented in the proxy module.

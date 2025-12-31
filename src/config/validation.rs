@@ -130,7 +130,6 @@ pub fn validate_config(config: &Config) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::config::*;
-    use std::net::SocketAddr;
 
     fn minimal_config() -> Config {
         Config {

@@ -166,6 +166,7 @@ impl FrontendListener {
 }
 
 /// Handle a TCP connection.
+#[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection(
     client_stream: TcpStream,
     client_addr: SocketAddr,
@@ -234,6 +235,7 @@ async fn handle_tcp_connection(
 }
 
 /// Handle an HTTP connection.
+#[allow(clippy::too_many_arguments)]
 async fn handle_http_connection(
     client_stream: TcpStream,
     client_addr: SocketAddr,
@@ -247,7 +249,7 @@ async fn handle_http_connection(
     // Select a backend server
     let backend_addr = router
         .select(backend_name, Some(client_addr))
-        .ok_or_else(|| "no backend servers available")?;
+        .ok_or("no backend servers available")?;
 
     info!(
         request_id = %request_id,
