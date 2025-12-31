@@ -1,0 +1,126 @@
+# Example Load Balancer Configuration
+# This file shows all available options with their defaults
+
+# Global settings
+global:
+  # Log level: trace, debug, info, warn, error
+  log_level: info
+
+  # Log format: json (structured) or pretty (human readable)
+  log_format: json
+
+  # Prometheus metrics endpoint
+  metrics:
+    enabled: true
+    address: "127.0.0.1:9090"
+    path: "/metrics"
+
+# Health check defaults (can be overridden per-backend)
+health_check_defaults:
+  # How often to probe backends (active health check)
+  interval: 10s
+
+  # How long to wait for health check response
+  timeout: 5s
+
+  # Number of consecutive failures before marking unhealthy
+  unhealthy_threshold: 3
+
+  # Number of consecutive successes before marking healthy again
+  healthy_threshold: 2
+
+  # How long to wait before retrying an unhealthy backend
+  cooldown: 30s
+
+# Frontend definitions (where we listen for connections)
+frontends:
+  # HTTP frontend example
+  - name: web-http
+    # Address to listen on
+    listen: "0.0.0.0:80"
+
+    # Protocol: tcp or http
+    protocol: http
+
+    # Which backend pool to use
+    backend: web-servers
+
+    # Load balancing algorithm: round_robin, least_connections, ip_hash, weighted
+    algorithm: least_connections
+
+    # HTTP-specific settings (only for protocol: http)
+    http:
+      # Headers to add to requests going to backend
+      request_headers:
+        X-Forwarded-For: "$client_ip"
+        X-Real-IP: "$client_ip"
+        X-Forwarded-Proto: "http"
+
+      # Headers to add to responses going to client
+      response_headers:
+        X-Served-By: "$backend_name"
+
+  # TCP frontend example (database proxy)
+  - name: postgres
+    listen: "0.0.0.0:5432"
+    protocol: tcp
+    backend: postgres-servers
+    algorithm: round_robin
+
+    # TCP-specific settings
+    tcp:
+      # Connection timeout
+      connect_timeout: 10s
+
+  # Another HTTP frontend on different port
+  - name: api
+    listen: "0.0.0.0:8080"
+    protocol: http
+    backend: api-servers
+    algorithm: ip_hash  # Sticky sessions for stateful API
+
+# Backend pool definitions (upstream servers)
+backends:
+  # Web servers pool
+  - name: web-servers
+    servers:
+      - address: "192.168.1.10:8000"
+        weight: 5  # Gets 5x traffic (used with weighted algorithm)
+
+      - address: "192.168.1.11:8000"
+        weight: 3
+
+      - address: "192.168.1.12:8000"
+        weight: 2
+
+    # Health check for this backend (overrides defaults)
+    health_check:
+      # Type: tcp (just connect) or http (GET request)
+      type: http
+      path: "/health"
+      expected_status: 200
+      interval: 5s  # Check more frequently for critical service
+
+  # PostgreSQL servers pool
+  - name: postgres-servers
+    servers:
+      - address: "192.168.1.20:5432"
+      - address: "192.168.1.21:5432"
+
+    health_check:
+      type: tcp  # Just verify we can connect
+      interval: 10s
+
+  # API servers pool
+  - name: api-servers
+    servers:
+      - address: "192.168.1.30:3000"
+      - address: "192.168.1.31:3000"
+      - address: "192.168.1.32:3000"
+
+    health_check:
+      type: http
+      path: "/api/health"
+      expected_status: 200
+      # Custom timeout for slow health endpoint
+      timeout: 10s
