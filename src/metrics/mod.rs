@@ -3,5 +3,5 @@
 mod collector;
 mod server;
 
-pub use collector::MetricsCollector;
+pub use collector::{MetricsCollector, RequestTimer};
 pub use server::MetricsServer;

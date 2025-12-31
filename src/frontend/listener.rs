@@ -4,13 +4,15 @@
 
 use crate::backend::BackendRouter;
 use crate::config::{FrontendConfig, HttpConfig, Protocol, TcpConfig};
+use crate::metrics::MetricsCollector;
 use crate::proxy::{handle_tcp_proxy, proxy_request, HttpProxyConfig, ProxyContext, TcpProxyError};
+use crate::util::RequestId;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, instrument, warn};
@@ -26,6 +28,8 @@ pub struct FrontendListener {
     router: Arc<BackendRouter>,
     /// TCP listener.
     listener: TcpListener,
+    /// Metrics collector.
+    metrics: MetricsCollector,
 }
 
 impl FrontendListener {
@@ -33,6 +37,7 @@ impl FrontendListener {
     pub async fn bind(
         config: FrontendConfig,
         router: Arc<BackendRouter>,
+        metrics: MetricsCollector,
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(config.listen).await?;
 
@@ -48,6 +53,7 @@ impl FrontendListener {
             config,
             router,
             listener,
+            metrics,
         })
     }
 
@@ -92,17 +98,27 @@ impl FrontendListener {
         let router = Arc::clone(&self.router);
         let tcp_config = self.config.tcp.clone();
         let http_config = self.config.http.clone();
+        let metrics = self.metrics.clone();
+        let request_id = RequestId::short();
+
+        // Track connection opened
+        metrics.connection_opened(&frontend_name, &backend_name);
 
         // Spawn a task to handle this connection
         tokio::spawn(async move {
+            let start_time = Instant::now();
+
             let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = match protocol {
                 Protocol::Tcp => {
                     handle_tcp_connection(
                         stream,
                         client_addr,
+                        &frontend_name,
                         &backend_name,
                         &router,
                         tcp_config,
+                        &metrics,
+                        &request_id,
                     )
                     .await
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
@@ -111,20 +127,38 @@ impl FrontendListener {
                     handle_http_connection(
                         stream,
                         client_addr,
+                        &frontend_name,
                         &backend_name,
                         &router,
                         http_config,
+                        &metrics,
+                        &request_id,
                     )
                     .await
                 }
             };
 
+            // Track connection closed
+            metrics.connection_closed(&frontend_name, &backend_name);
+
+            let duration = start_time.elapsed();
+
             if let Err(e) = result {
                 warn!(
                     frontend = frontend_name,
                     client = %client_addr,
+                    request_id = %request_id,
+                    duration_ms = duration.as_millis(),
                     error = %e,
                     "connection handling failed"
+                );
+            } else {
+                debug!(
+                    frontend = frontend_name,
+                    client = %client_addr,
+                    request_id = %request_id,
+                    duration_ms = duration.as_millis(),
+                    "connection completed"
                 );
             }
         });
@@ -135,9 +169,12 @@ impl FrontendListener {
 async fn handle_tcp_connection(
     client_stream: TcpStream,
     client_addr: SocketAddr,
+    frontend_name: &str,
     backend_name: &str,
     router: &BackendRouter,
     tcp_config: Option<TcpConfig>,
+    metrics: &MetricsCollector,
+    request_id: &RequestId,
 ) -> Result<(), TcpProxyError> {
     // Select a backend server
     let backend_addr = router
@@ -149,6 +186,13 @@ async fn handle_tcp_connection(
             )
         })?;
 
+    info!(
+        request_id = %request_id,
+        client = %client_addr,
+        backend = %backend_addr,
+        "TCP proxy session starting"
+    );
+
     // Get connect timeout
     let connect_timeout = tcp_config
         .map(|c| c.connect_timeout)
@@ -158,7 +202,30 @@ async fn handle_tcp_connection(
     router.on_connect(backend_name, backend_addr);
 
     // Handle the proxy
+    let start = Instant::now();
     let result = handle_tcp_proxy(client_stream, client_addr, backend_addr, connect_timeout).await;
+    let duration = start.elapsed();
+
+    // Record metrics
+    if let Ok(ref proxy_result) = result {
+        metrics.record_tcp_session(
+            frontend_name,
+            backend_name,
+            proxy_result.bytes_to_backend,
+            proxy_result.bytes_to_client,
+            duration,
+        );
+
+        info!(
+            request_id = %request_id,
+            client = %client_addr,
+            backend = %backend_addr,
+            bytes_to_backend = proxy_result.bytes_to_backend,
+            bytes_to_client = proxy_result.bytes_to_client,
+            duration_ms = duration.as_millis(),
+            "TCP proxy session completed"
+        );
+    }
 
     // Notify router of connection end
     router.on_disconnect(backend_name, backend_addr);
@@ -170,19 +237,23 @@ async fn handle_tcp_connection(
 async fn handle_http_connection(
     client_stream: TcpStream,
     client_addr: SocketAddr,
+    frontend_name: &str,
     backend_name: &str,
     router: &BackendRouter,
     http_config: Option<HttpConfig>,
+    metrics: &MetricsCollector,
+    request_id: &RequestId,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Select a backend server
     let backend_addr = router
         .select(backend_name, Some(client_addr))
         .ok_or_else(|| "no backend servers available")?;
 
-    debug!(
+    info!(
+        request_id = %request_id,
         client = %client_addr,
         backend = %backend_addr,
-        "handling HTTP connection"
+        "HTTP connection started"
     );
 
     // Build the proxy config from frontend HTTP config
@@ -198,12 +269,15 @@ async fn handle_http_connection(
         connect_timeout: DEFAULT_CONNECT_TIMEOUT,
     };
 
-    // Create the proxy context
+    // Create the proxy context with metrics
     let ctx = ProxyContext {
         client_addr,
         backend_addr,
+        frontend_name: frontend_name.to_string(),
         backend_name: backend_name.to_string(),
         config: proxy_config,
+        metrics: metrics.clone(),
+        connection_request_id: request_id.as_str().to_string(),
     };
 
     // Notify router of connection start
@@ -258,8 +332,9 @@ mod tests {
 
         let frontends = vec![config.clone()];
         let router = Arc::new(BackendRouter::new(&backends, &frontends));
+        let metrics = MetricsCollector::new();
 
-        let listener = FrontendListener::bind(config, router).await;
+        let listener = FrontendListener::bind(config, router, metrics).await;
         assert!(listener.is_ok());
     }
 }

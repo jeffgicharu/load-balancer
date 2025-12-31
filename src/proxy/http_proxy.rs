@@ -2,6 +2,7 @@
 //!
 //! Provides HTTP/1.1 proxying with header manipulation.
 
+use crate::metrics::MetricsCollector;
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
@@ -10,7 +11,7 @@ use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -42,10 +43,16 @@ pub struct ProxyContext {
     pub client_addr: SocketAddr,
     /// Backend server address.
     pub backend_addr: SocketAddr,
-    /// Backend name for logging.
+    /// Frontend name for metrics.
+    pub frontend_name: String,
+    /// Backend name for logging and metrics.
     pub backend_name: String,
     /// Proxy configuration.
     pub config: HttpProxyConfig,
+    /// Metrics collector.
+    pub metrics: MetricsCollector,
+    /// Connection-level request ID.
+    pub connection_request_id: String,
 }
 
 /// HTTP proxy error.
@@ -72,7 +79,14 @@ pub async fn proxy_request(
     mut req: Request<Incoming>,
     ctx: ProxyContext,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Infallible> {
-    debug!("proxying HTTP request");
+    let start_time = Instant::now();
+    let method = req.method().to_string();
+    let uri = req.uri().to_string();
+
+    debug!(
+        connection_id = %ctx.connection_request_id,
+        "proxying HTTP request"
+    );
 
     // Add request headers
     add_request_headers(&mut req, &ctx);
@@ -84,7 +98,19 @@ pub async fn proxy_request(
             stream
         }
         Err(e) => {
-            error!(error = %e, "failed to connect to backend");
+            error!(
+                connection_id = %ctx.connection_request_id,
+                error = %e,
+                "failed to connect to backend"
+            );
+            let duration = start_time.elapsed();
+            ctx.metrics.record_request(
+                &ctx.frontend_name,
+                &ctx.backend_name,
+                &method,
+                502,
+                duration,
+            );
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Failed to connect to backend",
@@ -98,7 +124,19 @@ pub async fn proxy_request(
     let (mut sender, conn) = match hyper::client::conn::http1::handshake(io).await {
         Ok(result) => result,
         Err(e) => {
-            error!(error = %e, "backend handshake failed");
+            error!(
+                connection_id = %ctx.connection_request_id,
+                error = %e,
+                "backend handshake failed"
+            );
+            let duration = start_time.elapsed();
+            ctx.metrics.record_request(
+                &ctx.frontend_name,
+                &ctx.backend_name,
+                &method,
+                502,
+                duration,
+            );
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Backend handshake failed",
@@ -114,8 +152,8 @@ pub async fn proxy_request(
     });
 
     // Modify the request URI to be relative (required for proxying)
-    let uri = req.uri().clone();
-    let path_and_query = uri
+    let req_uri = req.uri().clone();
+    let path_and_query = req_uri
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
@@ -126,7 +164,19 @@ pub async fn proxy_request(
     let backend_response = match sender.send_request(req).await {
         Ok(resp) => resp,
         Err(e) => {
-            error!(error = %e, "failed to send request to backend");
+            error!(
+                connection_id = %ctx.connection_request_id,
+                error = %e,
+                "failed to send request to backend"
+            );
+            let duration = start_time.elapsed();
+            ctx.metrics.record_request(
+                &ctx.frontend_name,
+                &ctx.backend_name,
+                &method,
+                502,
+                duration,
+            );
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Failed to send request to backend",
@@ -136,6 +186,7 @@ pub async fn proxy_request(
 
     // Convert the response
     let (mut parts, body) = backend_response.into_parts();
+    let status_code = parts.status.as_u16();
 
     // Add response headers
     add_response_headers(&mut parts.headers, &ctx);
@@ -144,8 +195,22 @@ pub async fn proxy_request(
     let boxed_body = body.map_err(|e| e).boxed();
     let response = Response::from_parts(parts, boxed_body);
 
+    // Record metrics
+    let duration = start_time.elapsed();
+    ctx.metrics.record_request(
+        &ctx.frontend_name,
+        &ctx.backend_name,
+        &method,
+        status_code,
+        duration,
+    );
+
     info!(
-        status = %response.status(),
+        connection_id = %ctx.connection_request_id,
+        method = %method,
+        uri = %uri,
+        status = status_code,
+        duration_ms = duration.as_millis(),
         "proxied request completed"
     );
 
@@ -231,14 +296,21 @@ pub struct HttpProxy;
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_substitute_variables() {
-        let ctx = ProxyContext {
+    fn test_context() -> ProxyContext {
+        ProxyContext {
             client_addr: "192.168.1.100:12345".parse().unwrap(),
             backend_addr: "10.0.0.1:8080".parse().unwrap(),
+            frontend_name: "test-frontend".to_string(),
             backend_name: "web-servers".to_string(),
             config: HttpProxyConfig::default(),
-        };
+            metrics: MetricsCollector::new(),
+            connection_request_id: "test-request-123".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_substitute_variables() {
+        let ctx = test_context();
 
         assert_eq!(
             substitute_variables("$client_ip", &ctx),

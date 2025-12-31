@@ -17,6 +17,7 @@ use rustlb::backend::BackendRouter;
 use rustlb::config::{load_config, Config, ConfigWatcher};
 use rustlb::frontend::FrontendListener;
 use rustlb::health::{HealthChecker, HealthConfig, HealthState};
+use rustlb::metrics::{MetricsCollector, MetricsServer};
 use rustlb::util::init_logging;
 
 /// A high-performance Layer 4/7 load balancer written in Rust.
@@ -125,6 +126,9 @@ async fn run_async(config: Config, config_path: PathBuf, no_watch: bool) -> Resu
     // Create shutdown channel
     let (shutdown_tx, _) = broadcast::channel::<()>(16);
 
+    // Create metrics collector
+    let metrics = MetricsCollector::new();
+
     // Create health state with config defaults
     let health_config = HealthConfig {
         unhealthy_threshold: config.health_check_defaults.unhealthy_threshold,
@@ -138,6 +142,20 @@ async fn run_async(config: Config, config_path: PathBuf, no_watch: bool) -> Resu
 
     // Store handles for all tasks
     let mut handles = Vec::new();
+
+    // Start metrics server (if enabled)
+    if config.global.metrics.enabled {
+        let metrics_server = MetricsServer::new(
+            config.global.metrics.address,
+            config.global.metrics.path.clone(),
+            metrics.clone(),
+        );
+        let shutdown_rx = shutdown_tx.subscribe();
+        let metrics_handle = tokio::spawn(async move {
+            metrics_server.run(shutdown_rx).await;
+        });
+        handles.push(metrics_handle);
+    }
 
     // Start health checker
     let health_checker = HealthChecker::new(
@@ -179,8 +197,9 @@ async fn run_async(config: Config, config_path: PathBuf, no_watch: bool) -> Resu
     for frontend_config in config.frontends {
         let router = Arc::clone(&router);
         let shutdown_rx = shutdown_tx.subscribe();
+        let metrics = metrics.clone();
 
-        let listener = FrontendListener::bind(frontend_config.clone(), router)
+        let listener = FrontendListener::bind(frontend_config.clone(), router, metrics)
             .await
             .with_context(|| {
                 format!(
@@ -198,6 +217,13 @@ async fn run_async(config: Config, config_path: PathBuf, no_watch: bool) -> Resu
 
     info!("rustlb is running");
     info!("press Ctrl+C to stop, send SIGHUP to reload config");
+    if config.global.metrics.enabled {
+        info!(
+            address = %config.global.metrics.address,
+            path = %config.global.metrics.path,
+            "metrics server available"
+        );
+    }
 
     // Wait for shutdown signal
     match tokio::signal::ctrl_c().await {
