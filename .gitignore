@@ -35,3 +35,8 @@ coverage/
 # Local configuration (user-specific)
 config.local.yaml
 *.local.yaml
+
+
+# Added by cargo
+
+/target
