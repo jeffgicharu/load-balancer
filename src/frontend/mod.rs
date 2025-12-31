@@ -7,6 +7,4 @@ mod http;
 mod listener;
 mod tcp;
 
-pub use http::HttpHandler;
 pub use listener::FrontendListener;
-pub use tcp::TcpHandler;

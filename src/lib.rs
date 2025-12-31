@@ -13,6 +13,8 @@ pub mod frontend;
 pub mod health;
 pub mod metrics;
 pub mod proxy;
+pub mod state;
 pub mod util;
 
 pub use config::Config;
+pub use state::AppState;

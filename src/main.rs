@@ -8,9 +8,13 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing::{error, info};
 
+use rustlb::backend::BackendRouter;
 use rustlb::config::{load_config, Config};
+use rustlb::frontend::FrontendListener;
 use rustlb::util::init_logging;
 
 /// A high-performance Layer 4/7 load balancer written in Rust.
@@ -107,13 +111,40 @@ fn run(config: Config) -> Result<()> {
         .build()
         .context("failed to create tokio runtime")?;
 
-    runtime.block_on(async {
-        run_async(config).await
-    })
+    runtime.block_on(async { run_async(config).await })
 }
 
 /// Async entry point for the load balancer.
 async fn run_async(config: Config) -> Result<()> {
+    // Create shutdown channel
+    let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+    // Create backend router
+    let router = Arc::new(BackendRouter::new(&config.backends, &config.frontends));
+
+    // Start frontend listeners
+    let mut handles = Vec::new();
+
+    for frontend_config in config.frontends {
+        let router = Arc::clone(&router);
+        let shutdown_rx = shutdown_tx.subscribe();
+
+        let listener = FrontendListener::bind(frontend_config.clone(), router)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to bind frontend '{}' on {}",
+                    frontend_config.name, frontend_config.listen
+                )
+            })?;
+
+        let handle = tokio::spawn(async move {
+            listener.run(shutdown_rx).await;
+        });
+
+        handles.push(handle);
+    }
+
     info!("rustlb is running");
     info!("press Ctrl+C to stop");
 
@@ -127,6 +158,14 @@ async fn run_async(config: Config) -> Result<()> {
         }
     }
 
-    info!("rustlb shutting down");
+    // Signal all listeners to shut down
+    let _ = shutdown_tx.send(());
+
+    // Wait for all listeners to finish
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    info!("rustlb shut down complete");
     Ok(())
 }
