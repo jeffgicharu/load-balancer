@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "A high-performance Layer 4/7 load balancer written in Rust"
 license = "MIT"
-repository = "https://github.com/yourusername/rustlb"
+repository = "https://github.com/jeffgicharu/load-balancer"
 keywords = ["load-balancer", "proxy", "networking", "http", "tcp"]
 categories = ["network-programming", "web-programming"]
 

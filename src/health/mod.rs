@@ -2,8 +2,8 @@
 
 mod checker;
 mod passive;
-mod state;
+pub mod state;
 
 pub use checker::HealthChecker;
 pub use passive::PassiveHealthTracker;
-pub use state::HealthState;
+pub use state::{HealthConfig, HealthState};

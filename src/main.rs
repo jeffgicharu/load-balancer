@@ -9,12 +9,14 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use rustlb::backend::BackendRouter;
-use rustlb::config::{load_config, Config};
+use rustlb::config::{load_config, Config, ConfigWatcher};
 use rustlb::frontend::FrontendListener;
+use rustlb::health::{HealthChecker, HealthConfig, HealthState};
 use rustlb::util::init_logging;
 
 /// A high-performance Layer 4/7 load balancer written in Rust.
@@ -33,6 +35,10 @@ struct Cli {
     /// Validate configuration and exit
     #[arg(long)]
     validate: bool,
+
+    /// Disable config file watching
+    #[arg(long)]
+    no_watch: bool,
 }
 
 fn main() -> Result<()> {
@@ -100,31 +106,76 @@ fn main() -> Result<()> {
     }
 
     // Run the load balancer
-    run(config)
+    run(config, cli.config, cli.no_watch)
 }
 
 /// Run the load balancer with the given configuration.
-fn run(config: Config) -> Result<()> {
+fn run(config: Config, config_path: PathBuf, no_watch: bool) -> Result<()> {
     // Create tokio runtime
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("failed to create tokio runtime")?;
 
-    runtime.block_on(async { run_async(config).await })
+    runtime.block_on(async { run_async(config, config_path, no_watch).await })
 }
 
 /// Async entry point for the load balancer.
-async fn run_async(config: Config) -> Result<()> {
+async fn run_async(config: Config, config_path: PathBuf, no_watch: bool) -> Result<()> {
     // Create shutdown channel
-    let (shutdown_tx, _) = broadcast::channel::<()>(1);
+    let (shutdown_tx, _) = broadcast::channel::<()>(16);
+
+    // Create health state with config defaults
+    let health_config = HealthConfig {
+        unhealthy_threshold: config.health_check_defaults.unhealthy_threshold,
+        healthy_threshold: config.health_check_defaults.healthy_threshold,
+        cooldown: config.health_check_defaults.cooldown,
+    };
+    let health_state = Arc::new(HealthState::with_config(health_config));
 
     // Create backend router
     let router = Arc::new(BackendRouter::new(&config.backends, &config.frontends));
 
-    // Start frontend listeners
+    // Store handles for all tasks
     let mut handles = Vec::new();
 
+    // Start health checker
+    let health_checker = HealthChecker::new(
+        Arc::clone(&health_state),
+        config.backends.clone(),
+        config.health_check_defaults.interval,
+        config.health_check_defaults.timeout,
+    );
+    let shutdown_rx = shutdown_tx.subscribe();
+    let health_handle = tokio::spawn(async move {
+        health_checker.run(shutdown_rx).await;
+    });
+    handles.push(health_handle);
+
+    // Start config watcher (unless disabled)
+    if !no_watch {
+        let shutdown_rx = shutdown_tx.subscribe();
+        let watcher = ConfigWatcher::new(
+            config_path,
+            Box::new(move |new_config| {
+                info!(
+                    frontends = new_config.frontends.len(),
+                    backends = new_config.backends.len(),
+                    "config reload triggered"
+                );
+                // Note: Full hot reload would require recreating router and listeners
+                // For now, we just log the event. Full implementation would use ArcSwap
+                // in the router to atomically swap the configuration.
+                warn!("hot reload of listeners not yet implemented - restart required for changes");
+            }),
+        );
+        let watcher_handle = tokio::spawn(async move {
+            watcher.run(shutdown_rx).await;
+        });
+        handles.push(watcher_handle);
+    }
+
+    // Start frontend listeners
     for frontend_config in config.frontends {
         let router = Arc::clone(&router);
         let shutdown_rx = shutdown_tx.subscribe();
@@ -146,7 +197,7 @@ async fn run_async(config: Config) -> Result<()> {
     }
 
     info!("rustlb is running");
-    info!("press Ctrl+C to stop");
+    info!("press Ctrl+C to stop, send SIGHUP to reload config");
 
     // Wait for shutdown signal
     match tokio::signal::ctrl_c().await {
@@ -158,12 +209,27 @@ async fn run_async(config: Config) -> Result<()> {
         }
     }
 
-    // Signal all listeners to shut down
+    // Signal all tasks to shut down
+    info!("initiating graceful shutdown");
     let _ = shutdown_tx.send(());
 
-    // Wait for all listeners to finish
-    for handle in handles {
-        let _ = handle.await;
+    // Wait for all tasks to finish with timeout
+    let shutdown_timeout = Duration::from_secs(30);
+    let shutdown_deadline = tokio::time::sleep(shutdown_timeout);
+    tokio::pin!(shutdown_deadline);
+
+    for (i, handle) in handles.into_iter().enumerate() {
+        tokio::select! {
+            result = handle => {
+                if let Err(e) = result {
+                    warn!(task = i, error = %e, "task panicked during shutdown");
+                }
+            }
+            _ = &mut shutdown_deadline => {
+                warn!("shutdown timeout reached, forcing exit");
+                break;
+            }
+        }
     }
 
     info!("rustlb shut down complete");

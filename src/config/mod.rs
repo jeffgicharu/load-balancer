@@ -8,4 +8,4 @@ mod watcher;
 pub use loader::load_config;
 pub use types::*;
 pub use validation::validate_config;
-pub use watcher::ConfigWatcher;
+pub use watcher::{ConfigWatcher, ReloadCallback};
